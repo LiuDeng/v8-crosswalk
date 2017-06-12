@@ -224,14 +224,6 @@ void LHasInstanceTypeAndBranch::PrintDataTo(StringStream* stream) {
   stream->Add(") then B%d else B%d", true_block_id(), false_block_id());
 }
 
-
-void LHasCachedArrayIndexAndBranch::PrintDataTo(StringStream* stream) {
-  stream->Add("if has_cached_array_index(");
-  value()->PrintTo(stream);
-  stream->Add(") then B%d else B%d", true_block_id(), false_block_id());
-}
-
-
 void LClassOfTestAndBranch::PrintDataTo(StringStream* stream) {
   stream->Add("if class_of_test(");
   value()->PrintTo(stream);
@@ -321,47 +313,23 @@ void LAccessArgumentsAt::PrintDataTo(StringStream* stream) {
 
 
 int LPlatformChunk::GetNextSpillIndex(RegisterKind kind) {
-  switch (kind) {
-    case GENERAL_REGISTERS:
-      return current_frame_slots_++;
-    case DOUBLE_REGISTERS: {
-      // Skip a slot if for a double-width slot.
-      current_frame_slots_++;
-      current_frame_slots_ |= 1;
-      num_double_slots_++;
-      return current_frame_slots_++;
-    }
-    case FLOAT32x4_REGISTERS:
-    case BOOL32x4_REGISTERS:
-    case INT32x4_REGISTERS: {
-      // Skip three slots if for a quad-width slot.
-      current_frame_slots_ += 3;
-      num_double_slots_ += 2;  // for dynamic frame alignment
-      return current_frame_slots_++;
-    }
-    default:
-      UNREACHABLE();
-      return -1;
+  // Skip a slot if for a double-width slot.
+  if (kind == DOUBLE_REGISTERS) {
+    current_frame_slots_++;
+    current_frame_slots_ |= 1;
+    num_double_slots_++;
   }
+  return current_frame_slots_++;
 }
 
 
 LOperand* LPlatformChunk::GetNextSpillSlot(RegisterKind kind) {
   int index = GetNextSpillIndex(kind);
-  switch (kind) {
-    case GENERAL_REGISTERS:
-      return LStackSlot::Create(index, zone());
-    case DOUBLE_REGISTERS:
-      return LDoubleStackSlot::Create(index, zone());
-    case FLOAT32x4_REGISTERS:
-      return LFloat32x4StackSlot::Create(index, zone());
-    case BOOL32x4_REGISTERS:
-      return LBool32x4StackSlot::Create(index, zone());
-    case INT32x4_REGISTERS:
-      return LInt32x4StackSlot::Create(index, zone());
-    default:
-      UNREACHABLE();
-      return NULL;
+  if (kind == DOUBLE_REGISTERS) {
+    return LDoubleStackSlot::Create(index, zone());
+  } else {
+    DCHECK(kind == GENERAL_REGISTERS);
+    return LStackSlot::Create(index, zone());
   }
 }
 
@@ -371,15 +339,6 @@ void LStoreNamedField::PrintDataTo(StringStream* stream) {
   std::ostringstream os;
   os << hydrogen()->access() << " <- ";
   stream->Add(os.str().c_str());
-  value()->PrintTo(stream);
-}
-
-
-void LStoreNamedGeneric::PrintDataTo(StringStream* stream) {
-  object()->PrintTo(stream);
-  stream->Add(".");
-  stream->Add(String::cast(*name())->ToCString().get());
-  stream->Add(" <- ");
   value()->PrintTo(stream);
 }
 
@@ -413,15 +372,6 @@ void LStoreKeyed::PrintDataTo(StringStream* stream) {
   } else {
     value()->PrintTo(stream);
   }
-}
-
-
-void LStoreKeyedGeneric::PrintDataTo(StringStream* stream) {
-  object()->PrintTo(stream);
-  stream->Add("[");
-  key()->PrintTo(stream);
-  stream->Add("] <- ");
-  value()->PrintTo(stream);
 }
 
 
@@ -934,7 +884,7 @@ void LChunkBuilder::AddInstruction(LInstruction* instr,
 
 LInstruction* LChunkBuilder::DoPrologue(HPrologue* instr) {
   LInstruction* result = new (zone()) LPrologue();
-  if (info_->scope()->num_heap_slots() > 0) {
+  if (info_->scope()->NeedsContext()) {
     result = MarkAsCall(result, instr);
   }
   return result;
@@ -950,17 +900,18 @@ LInstruction* LChunkBuilder::DoBranch(HBranch* instr) {
   HValue* value = instr->value();
   Representation r = value->representation();
   HType type = value->type();
-  ToBooleanICStub::Types expected = instr->expected_input_types();
-  if (expected.IsEmpty()) expected = ToBooleanICStub::Types::Generic();
+  ToBooleanHints expected = instr->expected_input_types();
+  if (expected == ToBooleanHint::kNone) expected = ToBooleanHint::kAny;
 
   bool easy_case = !r.IsTagged() || type.IsBoolean() || type.IsSmi() ||
       type.IsJSArray() || type.IsHeapNumber() || type.IsString();
-
-  LOperand* temp = !easy_case && expected.NeedsMap() ? TempRegister() : NULL;
+  LOperand* temp = !easy_case && (expected & ToBooleanHint::kNeedsMap)
+                       ? TempRegister()
+                       : NULL;
   LInstruction* branch = new(zone()) LBranch(UseRegister(value), temp);
-  if (!easy_case &&
-      ((!expected.Contains(ToBooleanICStub::SMI) && expected.NeedsMap()) ||
-       !expected.IsGeneric())) {
+  if (!easy_case && ((!(expected & ToBooleanHint::kSmallInteger) &&
+                      (expected & ToBooleanHint::kNeedsMap)) ||
+                     expected != ToBooleanHint::kAny)) {
     branch = AssignEnvironment(branch);
   }
   return branch;
@@ -1079,6 +1030,10 @@ LInstruction* LChunkBuilder::DoDeclareGlobals(HDeclareGlobals* instr) {
 LInstruction* LChunkBuilder::DoCallWithDescriptor(
     HCallWithDescriptor* instr) {
   CallInterfaceDescriptor descriptor = instr->descriptor();
+  DCHECK_EQ(descriptor.GetParameterCount() +
+                LCallWithDescriptor::kImplicitRegisterParameterCount,
+            instr->OperandCount());
+
   LOperand* target = UseRegisterOrConstantAtStart(instr->target());
   ZoneList<LOperand*> ops(instr->OperandCount(), zone());
   // Target
@@ -1086,14 +1041,19 @@ LInstruction* LChunkBuilder::DoCallWithDescriptor(
   // Context
   LOperand* op = UseFixed(instr->OperandAt(1), esi);
   ops.Add(op, zone());
-  // Other register parameters
-  for (int i = LCallWithDescriptor::kImplicitRegisterParameterCount;
-       i < instr->OperandCount(); i++) {
-    op =
-        UseFixed(instr->OperandAt(i),
-                 descriptor.GetRegisterParameter(
-                     i - LCallWithDescriptor::kImplicitRegisterParameterCount));
+  // Load register parameters.
+  int i = 0;
+  for (; i < descriptor.GetRegisterParameterCount(); i++) {
+    op = UseFixed(instr->OperandAt(
+                      i + LCallWithDescriptor::kImplicitRegisterParameterCount),
+                  descriptor.GetRegisterParameter(i));
     ops.Add(op, zone());
+  }
+  // Push stack parameters.
+  for (; i < descriptor.GetParameterCount(); i++) {
+    op = UseAny(instr->OperandAt(
+        i + LCallWithDescriptor::kImplicitRegisterParameterCount));
+    AddInstruction(new (zone()) LPushArgument(op), instr);
   }
 
   LCallWithDescriptor* result = new(zone()) LCallWithDescriptor(
@@ -1734,24 +1694,6 @@ LInstruction* LChunkBuilder::DoHasInstanceTypeAndBranch(
       TempRegister());
 }
 
-
-LInstruction* LChunkBuilder::DoGetCachedArrayIndex(
-    HGetCachedArrayIndex* instr)  {
-  DCHECK(instr->value()->representation().IsTagged());
-  LOperand* value = UseRegisterAtStart(instr->value());
-
-  return DefineAsRegister(new(zone()) LGetCachedArrayIndex(value));
-}
-
-
-LInstruction* LChunkBuilder::DoHasCachedArrayIndexAndBranch(
-    HHasCachedArrayIndexAndBranch* instr) {
-  DCHECK(instr->value()->representation().IsTagged());
-  return new(zone()) LHasCachedArrayIndexAndBranch(
-      UseRegisterAtStart(instr->value()));
-}
-
-
 LInstruction* LChunkBuilder::DoClassOfTestAndBranch(
     HClassOfTestAndBranch* instr) {
   DCHECK(instr->value()->representation().IsTagged());
@@ -1807,9 +1749,7 @@ LInstruction* LChunkBuilder::DoBoundsCheck(HBoundsCheck* instr) {
   LOperand* length = !index->IsConstantOperand()
       ? UseOrConstantAtStart(instr->length())
       : UseAtStart(instr->length());
-  LOperand* temp0 = TempRegister();
-  LOperand* temp1 = TempRegister();
-  LInstruction* result = new (zone()) LBoundsCheck(index, length, temp0, temp1);
+  LInstruction* result = new(zone()) LBoundsCheck(index, length);
   if (!FLAG_debug_code || !instr->skip_check()) {
     result = AssignEnvironment(result);
   }
@@ -1856,11 +1796,6 @@ LInstruction* LChunkBuilder::DoChange(HChange* instr) {
           DefineAsRegister(new(zone()) LNumberUntagD(value, temp));
       if (!val->representation().IsSmi()) result = AssignEnvironment(result);
       return result;
-    } else if (to.IsSIMD128()) {
-      LOperand* value = UseRegister(instr->value());
-      LOperand* temp = TempRegister();
-      LTaggedToSIMD128* res = new (zone()) LTaggedToSIMD128(value, temp, to);
-      return AssignEnvironment(DefineAsRegister(res));
     } else if (to.IsSmi()) {
       LOperand* value = UseRegister(val);
       if (val->type().IsSmi()) {
@@ -1935,18 +1870,6 @@ LInstruction* LChunkBuilder::DoChange(HChange* instr) {
         return DefineAsRegister(new(zone()) LInteger32ToDouble(Use(val)));
       }
     }
-  } else if (from.IsSIMD128()) {
-    DCHECK(to.IsTagged());
-    info()->MarkAsDeferredCalling();
-    LOperand* value = UseRegister(instr->value());
-    LOperand* temp = TempRegister();
-    LOperand* temp2 = TempRegister();
-
-    // Make sure that temp and result_temp are different registers.
-    LUnallocated* result_temp = TempRegister();
-    LSIMD128ToTagged* result =
-        new (zone()) LSIMD128ToTagged(value, temp, temp2);
-    return AssignPointerMap(Define(result, result_temp));
   }
   UNREACHABLE();
   return NULL;
@@ -2031,13 +1954,6 @@ LInstruction* LChunkBuilder::DoClampToUint8(HClampToUint8* instr) {
 }
 
 
-LInstruction* LChunkBuilder::DoDoubleBits(HDoubleBits* instr) {
-  HValue* value = instr->value();
-  DCHECK(value->representation().IsDouble());
-  return DefineAsRegister(new(zone()) LDoubleBits(UseRegister(value)));
-}
-
-
 LInstruction* LChunkBuilder::DoReturn(HReturn* instr) {
   LOperand* context = info()->IsStub() ? UseFixed(instr->context(), esi) : NULL;
   LOperand* parameter_count = UseRegisterOrConstant(instr->parameter_count());
@@ -2064,15 +1980,6 @@ LInstruction* LChunkBuilder::DoConstant(HConstant* instr) {
     UNREACHABLE();
     return NULL;
   }
-}
-
-
-LInstruction* LChunkBuilder::DoLoadGlobalGeneric(HLoadGlobalGeneric* instr) {
-  LOperand* context = UseFixed(instr->context(), esi);
-  LOperand* vector = FixedTemp(LoadWithVectorDescriptor::VectorRegister());
-
-  LLoadGlobalGeneric* result = new (zone()) LLoadGlobalGeneric(context, vector);
-  return MarkAsCall(DefineFixed(result, eax), instr);
 }
 
 
@@ -2112,17 +2019,6 @@ LInstruction* LChunkBuilder::DoLoadNamedField(HLoadNamedField* instr) {
       ? UseRegisterOrConstantAtStart(instr->object())
       : UseRegisterAtStart(instr->object());
   return DefineAsRegister(new(zone()) LLoadNamedField(obj));
-}
-
-
-LInstruction* LChunkBuilder::DoLoadNamedGeneric(HLoadNamedGeneric* instr) {
-  LOperand* context = UseFixed(instr->context(), esi);
-  LOperand* object =
-      UseFixed(instr->object(), LoadDescriptor::ReceiverRegister());
-  LOperand* vector = FixedTemp(LoadWithVectorDescriptor::VectorRegister());
-  LLoadNamedGeneric* result = new(zone()) LLoadNamedGeneric(
-      context, object, vector);
-  return MarkAsCall(DefineFixed(result, eax), instr);
 }
 
 
@@ -2184,34 +2080,14 @@ LInstruction* LChunkBuilder::DoLoadKeyed(HLoadKeyed* instr) {
 }
 
 
-LInstruction* LChunkBuilder::DoLoadKeyedGeneric(HLoadKeyedGeneric* instr) {
-  LOperand* context = UseFixed(instr->context(), esi);
-  LOperand* object =
-      UseFixed(instr->object(), LoadDescriptor::ReceiverRegister());
-  LOperand* key = UseFixed(instr->key(), LoadDescriptor::NameRegister());
-  LOperand* vector = FixedTemp(LoadWithVectorDescriptor::VectorRegister());
-  LLoadKeyedGeneric* result =
-      new(zone()) LLoadKeyedGeneric(context, object, key, vector);
-  return MarkAsCall(DefineFixed(result, eax), instr);
-}
-
-
 LOperand* LChunkBuilder::GetStoreKeyedValueOperand(HStoreKeyed* instr) {
   ElementsKind elements_kind = instr->elements_kind();
-  BuiltinFunctionId op = instr->op();
 
   // Determine if we need a byte register in this case for the value.
   bool val_is_fixed_register =
-      (elements_kind == UINT8_ELEMENTS || elements_kind == INT8_ELEMENTS ||
-       elements_kind == UINT8_CLAMPED_ELEMENTS) &&
-      (op != kInt8ArraySetFloat32x4XYZW && op != kInt8ArraySetFloat32x4X &&
-       op != kInt8ArraySetFloat32x4XY && op != kInt8ArraySetFloat32x4XYZ &&
-       op != kInt8ArraySetInt32x4XYZW && op != kInt8ArraySetInt32x4X &&
-       op != kInt8ArraySetInt32x4XY && op != kInt8ArraySetInt32x4XYZ &&
-       op != kUint8ArraySetFloat32x4XYZW && op != kUint8ArraySetFloat32x4X &&
-       op != kUint8ArraySetFloat32x4XY && op != kUint8ArraySetFloat32x4XYZ &&
-       op != kUint8ArraySetInt32x4XYZW && op != kUint8ArraySetInt32x4X &&
-       op != kUint8ArraySetInt32x4XY && op != kUint8ArraySetInt32x4XYZ);
+      elements_kind == UINT8_ELEMENTS ||
+      elements_kind == INT8_ELEMENTS ||
+      elements_kind == UINT8_CLAMPED_ELEMENTS;
   if (val_is_fixed_register) {
     return UseFixed(instr->value(), eax);
   }
@@ -2267,26 +2143,6 @@ LInstruction* LChunkBuilder::DoStoreKeyed(HStoreKeyed* instr) {
       ? UseTempRegister(instr->key())
       : UseRegisterOrConstantAtStart(instr->key());
   return new (zone()) LStoreKeyed(backing_store, key, val, backing_store_owner);
-}
-
-
-LInstruction* LChunkBuilder::DoStoreKeyedGeneric(HStoreKeyedGeneric* instr) {
-  LOperand* context = UseFixed(instr->context(), esi);
-  LOperand* object =
-      UseFixed(instr->object(), StoreDescriptor::ReceiverRegister());
-  LOperand* key = UseFixed(instr->key(), StoreDescriptor::NameRegister());
-  LOperand* value = UseFixed(instr->value(), StoreDescriptor::ValueRegister());
-
-  DCHECK(instr->object()->representation().IsTagged());
-  DCHECK(instr->key()->representation().IsTagged());
-  DCHECK(instr->value()->representation().IsTagged());
-
-  LOperand* slot = FixedTemp(VectorStoreICDescriptor::SlotRegister());
-  LOperand* vector = FixedTemp(VectorStoreICDescriptor::VectorRegister());
-
-  LStoreKeyedGeneric* result = new (zone())
-      LStoreKeyedGeneric(context, object, key, value, slot, vector);
-  return MarkAsCall(result, instr);
 }
 
 
@@ -2388,20 +2244,6 @@ LInstruction* LChunkBuilder::DoStoreNamedField(HStoreNamedField* instr) {
   LOperand* temp_map = needs_write_barrier_for_map ? TempRegister() : NULL;
 
   return new(zone()) LStoreNamedField(obj, val, temp, temp_map);
-}
-
-
-LInstruction* LChunkBuilder::DoStoreNamedGeneric(HStoreNamedGeneric* instr) {
-  LOperand* context = UseFixed(instr->context(), esi);
-  LOperand* object =
-      UseFixed(instr->object(), StoreDescriptor::ReceiverRegister());
-  LOperand* value = UseFixed(instr->value(), StoreDescriptor::ValueRegister());
-  LOperand* slot = FixedTemp(VectorStoreICDescriptor::SlotRegister());
-  LOperand* vector = FixedTemp(VectorStoreICDescriptor::VectorRegister());
-
-  LStoreNamedGeneric* result =
-      new (zone()) LStoreNamedGeneric(context, object, value, slot, vector);
-  return MarkAsCall(result, instr);
 }
 
 
@@ -2572,7 +2414,6 @@ LInstruction* LChunkBuilder::DoEnterInlined(HEnterInlined* instr) {
   inner->BindContext(instr->closure_context());
   inner->set_entry(instr);
   current_block_->UpdateEnvironment(inner);
-  chunk_->AddInlinedFunction(instr->shared());
   return NULL;
 }
 
@@ -2623,286 +2464,6 @@ LInstruction* LChunkBuilder::DoLoadFieldByIndex(HLoadFieldByIndex* instr) {
   LLoadFieldByIndex* load = new(zone()) LLoadFieldByIndex(object, index);
   LInstruction* result = DefineSameAsFirst(load);
   return AssignPointerMap(result);
-}
-
-const char* LNullarySIMDOperation::Mnemonic() const {
-  switch (op()) {
-#define SIMD_NULLARY_OPERATION_CASE_ITEM(module, function, name, p4) \
-  case k##name:                                                      \
-    return #module "-" #function;
-    SIMD_NULLARY_OPERATIONS(SIMD_NULLARY_OPERATION_CASE_ITEM)
-#undef SIMD_NULLARY_OPERATION_CASE_ITEM
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-LInstruction* LChunkBuilder::DoNullarySIMDOperation(
-    HNullarySIMDOperation* instr) {
-  LNullarySIMDOperation* result =
-      new (zone()) LNullarySIMDOperation(instr->op());
-  switch (instr->op()) {
-#define SIMD_NULLARY_OPERATION_CASE_ITEM(module, function, name, p4) \
-  case k##name:
-    SIMD_NULLARY_OPERATIONS(SIMD_NULLARY_OPERATION_CASE_ITEM)
-#undef SIMD_NULLARY_OPERATION_CASE_ITEM
-    return DefineAsRegister(result);
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-const char* LUnarySIMDOperation::Mnemonic() const {
-  switch (op()) {
-    case kSIMD128Change:
-      return "SIMD128-change";
-#define SIMD_UNARY_OPERATION_CASE_ITEM(module, function, name, p4, p5) \
-  case k##name:                                                        \
-    return #module "-" #function;
-      SIMD_UNARY_OPERATIONS(SIMD_UNARY_OPERATION_CASE_ITEM)
-      SIMD_UNARY_OPERATIONS_FOR_PROPERTY_ACCESS(SIMD_UNARY_OPERATION_CASE_ITEM)
-#undef SIMD_UNARY_OPERATION_CASE_ITEM
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-LInstruction* LChunkBuilder::DoUnarySIMDOperation(HUnarySIMDOperation* instr) {
-  LOperand* input = UseRegisterAtStart(instr->value());
-  LUnarySIMDOperation* result =
-      new (zone()) LUnarySIMDOperation(input, instr->op());
-  switch (instr->op()) {
-    case kSIMD128Change:
-      return AssignEnvironment(DefineAsRegister(result));
-    case kFloat32x4Abs:
-    case kFloat32x4Neg:
-    case kFloat32x4RecipApprox:
-    case kFloat32x4RecipSqrtApprox:
-    case kFloat32x4Sqrt:
-    case kInt32x4Neg:
-    case kInt32x4Not:
-      return DefineSameAsFirst(result);
-    case kFloat32x4Check:
-    case kInt32x4Check:
-    case kFloat32x4BitsToInt32x4:
-    case kFloat32x4ToInt32x4:
-    case kInt32x4BitsToFloat32x4:
-    case kInt32x4ToFloat32x4:
-    case kFloat32x4Splat:
-    case kInt32x4Splat:
-    case kFloat32x4GetSignMask:
-    case kFloat32x4GetX:
-    case kFloat32x4GetY:
-    case kFloat32x4GetZ:
-    case kFloat32x4GetW:
-    case kInt32x4GetSignMask:
-    case kInt32x4GetX:
-    case kInt32x4GetY:
-    case kInt32x4GetZ:
-    case kInt32x4GetW:
-    case kBool32x4AnyTrue:
-    case kBool32x4AllTrue:
-    case kInt32x4GetFlagX:
-    case kInt32x4GetFlagY:
-    case kInt32x4GetFlagZ:
-    case kInt32x4GetFlagW:
-      return DefineAsRegister(result);
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-const char* LBinarySIMDOperation::Mnemonic() const {
-  switch (op()) {
-#define SIMD_BINARY_OPERATION_CASE_ITEM(module, function, name, p4, p5, p6) \
-  case k##name:                                                             \
-    return #module "-" #function;
-    SIMD_BINARY_OPERATIONS(SIMD_BINARY_OPERATION_CASE_ITEM)
-#undef SIMD_BINARY_OPERATION_CASE_ITEM
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-LInstruction* LChunkBuilder::DoBinarySIMDOperation(
-    HBinarySIMDOperation* instr) {
-  switch (instr->op()) {
-    case kFloat32x4Add:
-    case kFloat32x4Div:
-    case kFloat32x4Max:
-    case kFloat32x4Min:
-    case kFloat32x4Mul:
-    case kFloat32x4Sub:
-    case kInt32x4Add:
-    case kInt32x4And:
-    case kInt32x4Mul:
-    case kInt32x4Or:
-    case kInt32x4Sub:
-    case kInt32x4Xor:
-    case kInt32x4GreaterThan:
-    case kInt32x4Equal:
-    case kInt32x4LessThan: {
-      LOperand* left = UseRegisterAtStart(instr->left());
-      LOperand* right = UseRegisterAtStart(instr->right());
-      LBinarySIMDOperation* result =
-          new (zone()) LBinarySIMDOperation(left, right, instr->op());
-      return DefineSameAsFirst(result);
-    }
-    case kFloat32x4ExtractLane:
-    case kBool32x4ExtractLane:
-    case kInt32x4ExtractLane:
-    case kInt32x4ShiftLeft:
-    case kInt32x4ShiftRightArithmetic: {
-      LOperand* left = UseRegisterAtStart(instr->left());
-      LOperand* right = UseOrConstant(instr->right());
-      LBinarySIMDOperation* result =
-          new (zone()) LBinarySIMDOperation(left, right, instr->op());
-      if (instr->op() == kFloat32x4ExtractLane ||
-          instr->op() == kBool32x4ExtractLane ||
-          instr->op() == kInt32x4ExtractLane)
-        return AssignEnvironment(DefineAsRegister(result));
-      else
-        return AssignEnvironment(DefineSameAsFirst(result));
-    }
-    case kFloat32x4LessThan:
-    case kFloat32x4LessThanOrEqual:
-    case kFloat32x4Equal:
-    case kFloat32x4NotEqual:
-    case kFloat32x4GreaterThanOrEqual:
-    case kFloat32x4GreaterThan: {
-      LOperand* left = UseRegisterAtStart(instr->left());
-      LOperand* right = UseRegisterAtStart(instr->right());
-      LBinarySIMDOperation* result =
-          new (zone()) LBinarySIMDOperation(left, right, instr->op());
-      return DefineAsRegister(result);
-    }
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-const char* LTernarySIMDOperation::Mnemonic() const {
-  switch (op()) {
-#define SIMD_TERNARY_OPERATION_CASE_ITEM(module, function, name, p4, p5, p6, \
-                                         p7)                                 \
-  case k##name:                                                              \
-    return #module "-" #function;
-    SIMD_TERNARY_OPERATIONS(SIMD_TERNARY_OPERATION_CASE_ITEM)
-#undef SIMD_TERNARY_OPERATION_CASE_ITEM
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-LInstruction* LChunkBuilder::DoTernarySIMDOperation(
-    HTernarySIMDOperation* instr) {
-  LOperand* first = UseRegisterAtStart(instr->first());
-  LOperand* second = UseRegisterAtStart(instr->second());
-  LOperand* third = UseRegisterAtStart(instr->third());
-  LTernarySIMDOperation* result =
-      new (zone()) LTernarySIMDOperation(first, second, third, instr->op());
-  switch (instr->op()) {
-    case kInt32x4Select:
-    case kFloat32x4Select: {
-      return DefineAsRegister(result);
-    }
-    case kFloat32x4ReplaceLane:
-    case kInt32x4ReplaceLane: {
-      LOperand* second = UseOrConstant(instr->second());
-      LOperand* third = UseRegisterAtStart(instr->third());
-      LTernarySIMDOperation* result =
-          new (zone()) LTernarySIMDOperation(first, second, third, instr->op());
-      return AssignEnvironment(DefineSameAsFirst(result));
-    }
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-const char* LQuarternarySIMDOperation::Mnemonic() const {
-  switch (op()) {
-#define SIMD_QUARTERNARY_OPERATION_CASE_ITEM(module, function, name, p4, p5, \
-                                             p6, p7, p8)                     \
-  case k##name:                                                              \
-    return #module "-" #function;
-    SIMD_QUARTERNARY_OPERATIONS(SIMD_QUARTERNARY_OPERATION_CASE_ITEM)
-#undef SIMD_QUARTERNARY_OPERATION_CASE_ITEM
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-LInstruction* LChunkBuilder::DoQuarternarySIMDOperation(
-    HQuarternarySIMDOperation* instr) {
-  LOperand* x = UseRegisterAtStart(instr->x());
-  LOperand* y = UseRegisterAtStart(instr->y());
-  LOperand* z = UseRegisterAtStart(instr->z());
-  LOperand* w = UseRegisterAtStart(instr->w());
-  LQuarternarySIMDOperation* result =
-      new (zone()) LQuarternarySIMDOperation(x, y, z, w, instr->op());
-  return DefineAsRegister(result);
-}
-
-const char* LQuinarySIMDOperation::Mnemonic() const {
-  switch (op()) {
-#define SIMD_QUINARY_OPERATION_CASE_ITEM(module, function, name, p4, p5, p6, \
-                                         p7, p8, p9)                         \
-  case k##name:                                                              \
-    return #module "-" #function;
-    SIMD_QUINARY_OPERATIONS(SIMD_QUINARY_OPERATION_CASE_ITEM)
-#undef SIMD_QUINARY_OPERATION_CASE_ITEM
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-LInstruction* LChunkBuilder::DoQuinarySIMDOperation(
-    HQuinarySIMDOperation* instr) {
-  LOperand* a0 = UseRegisterAtStart(instr->a0());
-  LOperand* a1 = UseOrConstant(instr->a1());
-  LOperand* a2 = UseOrConstant(instr->a2());
-  LOperand* a3 = UseOrConstant(instr->a3());
-  LOperand* a4 = UseOrConstant(instr->a4());
-  LQuinarySIMDOperation* result =
-      new (zone()) LQuinarySIMDOperation(a0, a1, a2, a3, a4, instr->op());
-  return AssignEnvironment(DefineSameAsFirst(result));
-}
-
-const char* LSenarySIMDOperation::Mnemonic() const {
-  switch (op()) {
-#define SIMD_SENARY_OPERATION_CASE_ITEM(module, function, name, p4, p5, p6, \
-                                        p7, p8, p9, p10)                    \
-  case k##name:                                                             \
-    return #module "-" #function;
-    SIMD_SENARY_OPERATIONS(SIMD_SENARY_OPERATION_CASE_ITEM)
-#undef SIMD_SENARY_OPERATION_CASE_ITEM
-    default:
-      UNREACHABLE();
-      return NULL;
-  }
-}
-
-LInstruction* LChunkBuilder::DoSenarySIMDOperation(
-    HSenarySIMDOperation* instr) {
-  LOperand* a0 = UseRegisterAtStart(instr->a0());
-  LOperand* a1 = UseRegisterAtStart(instr->a1());
-  LOperand* a2 = UseOrConstant(instr->a2());
-  LOperand* a3 = UseOrConstant(instr->a3());
-  LOperand* a4 = UseOrConstant(instr->a4());
-  LOperand* a5 = UseOrConstant(instr->a5());
-  LSenarySIMDOperation* result =
-      new (zone()) LSenarySIMDOperation(a0, a1, a2, a3, a4, a5, instr->op());
-  return AssignEnvironment(DefineSameAsFirst(result));
 }
 
 }  // namespace internal
