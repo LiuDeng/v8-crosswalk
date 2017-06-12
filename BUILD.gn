@@ -51,7 +51,7 @@ declare_args() {
 
   # Enable ECMAScript Internationalization API. Enabling this feature will
   # add a dependency on the ICU library.
-  v8_enable_i18n_support = true
+#  v8_enable_i18n_support = true
 
   # Enable slow dchecks.
   v8_enable_slow_dchecks = false
@@ -93,7 +93,7 @@ declare_args() {
   # if files export symbols used by later files, they should go first.
   #
   # This default is used by cctests. Projects using V8 will want to override.
-  v8_extra_library_files = [ "//test/cctest/test-extra.js" ]
+#  v8_extra_library_files = [ "//test/cctest/test-extra.js" ]
 
   # Like v8_extra_library_files but for experimental features.
   #
