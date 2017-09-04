@@ -2436,11 +2436,16 @@ HValue* HGraphBuilder::BuildStringAdd(
   return Pop();
 }
 
+
 HInstruction* HGraphBuilder::BuildUncheckedMonomorphicElementAccess(
-    HValue* checked_object, HValue* key, HValue* val, bool is_js_array,
-    ElementsKind elements_kind, PropertyAccessType access_type,
-    LoadKeyedHoleMode load_mode, KeyedAccessStoreMode store_mode,
-    BuiltinFunctionId op) {
+    HValue* checked_object,
+    HValue* key,
+    HValue* val,
+    bool is_js_array,
+    ElementsKind elements_kind,
+    PropertyAccessType access_type,
+    LoadKeyedHoleMode load_mode,
+    KeyedAccessStoreMode store_mode) {
   DCHECK(top_info()->IsStub() || checked_object->IsCompareMap() ||
          checked_object->IsCheckMaps());
   DCHECK(!IsFixedTypedArrayElementsKind(elements_kind) || !is_js_array);
@@ -2503,10 +2508,10 @@ HInstruction* HGraphBuilder::BuildUncheckedMonomorphicElementAccess(
       return result;
     } else {
       DCHECK(store_mode == STANDARD_STORE);
-      checked_key = Add<HBoundsCheck>(key, length, op, elements_kind);
+      checked_key = Add<HBoundsCheck>(key, length);
       return AddElementAccess(backing_store, checked_key, val, checked_object,
                               checked_object->ActualValue(), elements_kind,
-                              access_type, NEVER_RETURN_HOLE, op);
+                              access_type);
     }
   }
   DCHECK(fast_smi_only_elements ||
@@ -2546,7 +2551,7 @@ HInstruction* HGraphBuilder::BuildUncheckedMonomorphicElementAccess(
     }
   }
   return AddElementAccess(elements, checked_key, val, checked_object, nullptr,
-                          elements_kind, access_type, load_mode, op);
+                          elements_kind, access_type, load_mode);
 }
 
 
@@ -2657,27 +2662,25 @@ void HGraphBuilder::BuildJSArrayHeader(HValue* array,
   }
 }
 
+
 HInstruction* HGraphBuilder::AddElementAccess(
     HValue* elements, HValue* checked_key, HValue* val, HValue* dependency,
     HValue* backing_store_owner, ElementsKind elements_kind,
-    PropertyAccessType access_type, LoadKeyedHoleMode load_mode,
-    BuiltinFunctionId op) {
+    PropertyAccessType access_type, LoadKeyedHoleMode load_mode) {
   if (access_type == STORE) {
     DCHECK(val != NULL);
     if (elements_kind == UINT8_CLAMPED_ELEMENTS) {
       val = Add<HClampToUint8>(val);
     }
     return Add<HStoreKeyed>(elements, checked_key, val, backing_store_owner,
-                            elements_kind, STORE_TO_INITIALIZED_ENTRY,
-                            kDefaultKeyedHeaderOffsetSentinel, op);
+                            elements_kind, STORE_TO_INITIALIZED_ENTRY);
   }
 
   DCHECK(access_type == LOAD);
   DCHECK(val == NULL);
-  HLoadKeyed* load = Add<HLoadKeyed>(
-      elements, checked_key, dependency, backing_store_owner, elements_kind,
-      load_mode, kDefaultKeyedHeaderOffsetSentinel, op);
-
+  HLoadKeyed* load =
+      Add<HLoadKeyed>(elements, checked_key, dependency, backing_store_owner,
+                      elements_kind, load_mode);
   if (elements_kind == UINT32_ELEMENTS) {
     graph()->RecordUint32Instruction(load);
   }
@@ -4005,7 +4008,7 @@ bool HOptimizedGraphBuilder::BuildGraph() {
   // Set this predicate early to avoid handle deref during graph optimization.
   graph()->set_allow_code_motion(
       current_info()->IsStub() ||
-      current_info()->shared_info()->opt_count() + 1 < FLAG_max_opt_count);
+      current_info()->shared_info()->deopt_count() + 1 < FLAG_max_deopt_count);
 
   // Perform any necessary OSR-specific cleanups or changes to the graph.
   osr()->FinishGraph();
@@ -6051,7 +6054,6 @@ bool HOptimizedGraphBuilder::PropertyAccessInfo::CanAccessAsMonomorphic(
   if (!CanAccessMonomorphic()) return false;
   STATIC_ASSERT(kMaxLoadPolymorphism == kMaxStorePolymorphism);
   if (maps->length() > kMaxLoadPolymorphism) return false;
-
   HObjectAccess access = HObjectAccess::ForMap();  // bogus default
   if (GetJSObjectFieldAccess(&access)) {
     for (int i = 1; i < maps->length(); ++i) {
@@ -6103,6 +6105,7 @@ bool HOptimizedGraphBuilder::PropertyAccessInfo::NeedsWrappingFor(
     Handle<JSFunction> target) const {
   return NeedsWrapping(map_, target);
 }
+
 
 HValue* HOptimizedGraphBuilder::BuildMonomorphicAccess(
     PropertyAccessInfo* info, HValue* object, HValue* checked_object,
@@ -6570,13 +6573,15 @@ void HOptimizedGraphBuilder::HandleGlobalVariableAssignment(Variable* var,
     HValue* name = Add<HConstant>(var->name());
     HValue* vector_value = Add<HConstant>(vector);
     HValue* slot_value = Add<HConstant>(vector->GetIndex(slot));
+    DCHECK(vector->IsStoreGlobalIC(slot));
     DCHECK_EQ(vector->GetLanguageMode(slot), function_language_mode());
-    Callable callable = CodeFactory::StoreICInOptimizedCode(
+    Callable callable = CodeFactory::StoreGlobalICInOptimizedCode(
         isolate(), function_language_mode());
     HValue* stub = Add<HConstant>(callable.code());
     HValue* values[] = {global_object, name, value, slot_value, vector_value};
-    HCallWithDescriptor* instr = Add<HCallWithDescriptor>(
-        Code::STORE_IC, stub, 0, callable.descriptor(), ArrayVector(values));
+    HCallWithDescriptor* instr =
+        Add<HCallWithDescriptor>(Code::STORE_GLOBAL_IC, stub, 0,
+                                 callable.descriptor(), ArrayVector(values));
     USE(instr);
     DCHECK(instr->HasObservableSideEffects());
     Add<HSimulate>(ast_id, REMOVABLE_SIMULATE);
@@ -6803,8 +6808,7 @@ void HOptimizedGraphBuilder::VisitAssignment(Assignment* expr) {
   }
 }
 
-
-void HOptimizedGraphBuilder::VisitYield(Yield* expr) {
+void HOptimizedGraphBuilder::VisitSuspend(Suspend* expr) {
   // Generators are not optimized, so we should never get here.
   UNREACHABLE();
 }
@@ -7163,7 +7167,7 @@ HValue* HOptimizedGraphBuilder::HandlePolymorphicElementAccess(
         elements_kind != GetInitialFastElementsKind()) {
       possible_transitioned_maps.Add(map);
     }
-    if (IsSloppyArgumentsElements(elements_kind)) {
+    if (IsSloppyArgumentsElementsKind(elements_kind)) {
       HInstruction* result =
           BuildKeyedGeneric(access_type, expr, slot, object, key, val);
       *has_side_effects = result->HasObservableSideEffects();
@@ -7176,6 +7180,7 @@ HValue* HOptimizedGraphBuilder::HandlePolymorphicElementAccess(
     Map* transitioned_map =
         map->FindElementsKindTransitionedMap(&possible_transitioned_maps);
     if (transitioned_map != nullptr) {
+      DCHECK(!map->is_stable());
       transition_target.Add(handle(transitioned_map));
     } else {
       transition_target.Add(Handle<Map>());
@@ -8097,7 +8102,8 @@ bool HOptimizedGraphBuilder::TryInline(Handle<JSFunction> target,
       top_info()->parse_info()->ast_value_factory());
   parse_info.set_ast_value_factory_owned(false);
 
-  CompilationInfo target_info(parse_info.zone(), &parse_info, target);
+  CompilationInfo target_info(parse_info.zone(), &parse_info,
+                              target->GetIsolate(), target);
 
   if (inlining_kind != CONSTRUCT_CALL_RETURN &&
       IsClassConstructor(target_shared->kind())) {
@@ -8109,7 +8115,7 @@ bool HOptimizedGraphBuilder::TryInline(Handle<JSFunction> target,
     TraceInline(target, caller, "target is being debugged");
     return false;
   }
-  if (!Compiler::ParseAndAnalyze(target_info.parse_info())) {
+  if (!Compiler::ParseAndAnalyze(&target_info)) {
     if (target_info.isolate()->has_pending_exception()) {
       // Parse or scope error, never optimize this function.
       SetStackOverflow();
@@ -8444,7 +8450,7 @@ bool HOptimizedGraphBuilder::TryInlineBuiltinFunctionCall(Call* expr) {
       // Not supported for inlining yet.
       break;
   }
-  return TryInlineSIMDBuiltinCall(expr, id, expr->arguments()->length() + 1);
+  return false;
 }
 
 
@@ -8946,166 +8952,13 @@ bool HOptimizedGraphBuilder::TryInlineBuiltinMethodCall(
       ast_context()->ReturnValue(index);
       return true;
     }
-#define SIMD_NULLARY_OPERATION_CASE_ITEM(p1, p2, name, p4) case k##name:
-      SIMD_NULLARY_OPERATIONS(SIMD_NULLARY_OPERATION_CASE_ITEM)
-#undef SIMD_NULLARY_OPERATION_CASE_ITEM
-      if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 1) {
-        Drop(2);  // Receiver and function.
-        HInstruction* op = NewUncasted<HNullarySIMDOperation>(id);
-        ast_context()->ReturnInstruction(op, ast_id);
-        return true;
-      }
-      break;
-#define SIMD_UNARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5) case k##name:
-      SIMD_UNARY_OPERATIONS(SIMD_UNARY_OPERATION_CASE_ITEM)
-#undef SIMD_UNARY_OPERATION_CASE_ITEM
-      if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 2) {
-        HValue* argument = Pop();
-        Drop(2);  // Receiver and function.
-        HInstruction* op = NewUncasted<HUnarySIMDOperation>(argument, id);
-        ast_context()->ReturnInstruction(op, ast_id);
-        return true;
-      }
-      break;
-#define SIMD_BINARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5, p6) case k##name:
-      SIMD_BINARY_OPERATIONS(SIMD_BINARY_OPERATION_CASE_ITEM)
-#undef SIMD_BINARY_OPERATION_CASE_ITEM
-      if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 3) {
-        HValue* right = Pop();
-        HValue* left = Pop();
-        Drop(2);  // Receiver and function.
-        HInstruction* op = NewUncasted<HBinarySIMDOperation>(left, right, id);
-        ast_context()->ReturnInstruction(op, ast_id);
-        return true;
-      }
-      break;
-#define SIMD_TERNARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5, p6, p7) \
-  case k##name:
-      SIMD_TERNARY_OPERATIONS(SIMD_TERNARY_OPERATION_CASE_ITEM)
-#undef SIMD_TERNARY_OPERATION_CASE_ITEM
-      if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 4) {
-        HValue* right = Pop();
-        HValue* left = Pop();
-        HValue* value = Pop();
-        Drop(2);  // Receiver and function.
-        HInstruction* op =
-            NewUncasted<HTernarySIMDOperation>(value, left, right, id);
-        ast_context()->ReturnInstruction(op, ast_id);
-        return true;
-      }
-      break;
-#define SIMD_QUARTERNARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5, p6, p7, p8) \
-  case k##name:
-      SIMD_QUARTERNARY_OPERATIONS(SIMD_QUARTERNARY_OPERATION_CASE_ITEM)
-#undef SIMD_QUARTERNARY_OPERATION_CASE_ITEM
-      if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 5) {
-        HValue* w = Pop();
-        HValue* z = Pop();
-        HValue* y = Pop();
-        HValue* x = Pop();
-        Drop(2);  // Receiver and function.
-        HValue* context = environment()->context();
-        HInstruction* op = HQuarternarySIMDOperation::New(
-            isolate(), zone(), context, x, y, z, w, id);
-        ast_context()->ReturnInstruction(op, ast_id);
-        return true;
-      }
-      break;
-#define SIMD_QUINARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5, p6, p7, p8, p9) \
-  case k##name:
-      SIMD_QUINARY_OPERATIONS(SIMD_QUINARY_OPERATION_CASE_ITEM)
-#undef SIMD_QUINARY_OPERATION_CASE_ITEM
-      if (CpuFeatures::SupportsSIMD128InCrankshaft() &&
-          args_count_no_receiver == 5) {
-        HValue* a4 = Pop();
-        HValue* a3 = Pop();
-        HValue* a2 = Pop();
-        HValue* a1 = Pop();
-        HValue* a0 = Pop();
-        Drop(2);  // Receiver and function.
-        HInstruction* op =
-            NewUncasted<HQuinarySIMDOperation>(a0, a1, a2, a3, a4, id);
-        ast_context()->ReturnInstruction(op, ast_id);
-        return true;
-      }
-      break;
-#define SIMD_SENARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5, p6, p7, p8, p9, \
-                                        p10)                                  \
-  case k##name:
-      SIMD_SENARY_OPERATIONS(SIMD_SENARY_OPERATION_CASE_ITEM)
-#undef SIMD_SENARY_OPERATION_CASE_ITEM
-      if (CpuFeatures::SupportsSIMD128InCrankshaft() &&
-          args_count_no_receiver == 6) {
-        HValue* a5 = Pop();
-        HValue* a4 = Pop();
-        HValue* a3 = Pop();
-        HValue* a2 = Pop();
-        HValue* a1 = Pop();
-        HValue* a0 = Pop();
-        Drop(2);  // Receiver and function.
-        HInstruction* op =
-            NewUncasted<HSenarySIMDOperation>(a0, a1, a2, a3, a4, a5, id);
-        ast_context()->ReturnInstruction(op, ast_id);
-        return true;
-      }
-      break;
-#define TYPED_ARRAY_SIMD_LOAD_OPERATION_CASE_ITEM(p1, p2, name) case k##name:
-      TYPED_ARRAYS_SIMD_LOAD_OPERATIONS(
-          TYPED_ARRAY_SIMD_LOAD_OPERATION_CASE_ITEM)
-#undef TYPED_ARRAY_SIMD_LOAD_OPERATION_CASE_ITEM
-      if (receiver_map.is_null()) return false;
-      if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 2) {
-#if V8_TARGET_ARCH_X64
-        // TODO(nhu): support x64.
-        return false;
-#else
-        HValue* key = Pop();
-        HValue* tarray = Pop();
-        Drop(1);  // Drop function.
-        HInstruction* instr = BuildUncheckedMonomorphicElementAccess(
-            tarray, key, NULL, receiver_map->instance_type() == JS_ARRAY_TYPE,
-            receiver_map->elements_kind(),
-            LOAD,               // is_store.
-            NEVER_RETURN_HOLE,  // load_mode.
-            STANDARD_STORE, id);
-        ast_context()->ReturnValue(instr);
-        return true;
-#endif
-      }
-      break;
-#define TYPED_ARRAY_SIMD_STORE_OPERATION_CASE_ITEM(p1, p2, name) case k##name:
-      TYPED_ARRAYS_SIMD_STORE_OPERATIONS(
-          TYPED_ARRAY_SIMD_STORE_OPERATION_CASE_ITEM)
-#undef TYPED_ARRAY_SIMD_STORE_OPERATION_CASE_ITEM
-      if (receiver_map.is_null()) return false;
-      if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 3) {
-#if V8_TARGET_ARCH_X64
-        // TODO(nhu): support x64.
-        return false;
-#else
-        HValue* value = Pop();
-        HValue* key = Pop();
-        HValue* tarray = Pop();
-        Drop(1);  // Drop function.
-        BuildUncheckedMonomorphicElementAccess(
-            tarray, key, value, receiver_map->instance_type() == JS_ARRAY_TYPE,
-            receiver_map->elements_kind(),
-            STORE,              // is_store.
-            NEVER_RETURN_HOLE,  // load_mode.
-            STANDARD_STORE, id);
-        Push(value);
-        Add<HSimulate>(ast_id, REMOVABLE_SIMULATE);
-        ast_context()->ReturnValue(Pop());
-        return true;
-#endif
-      }
-      break;
     default:
       // Not yet supported for inlining.
       break;
   }
   return false;
-}  // NOLINT(readability/fn_size)
+}
+
 
 bool HOptimizedGraphBuilder::TryInlineApiFunctionCall(Call* expr,
                                                       HValue* receiver) {
@@ -9894,6 +9747,7 @@ bool HOptimizedGraphBuilder::TryInlineArrayCall(Expression* expression,
 static bool IsAllocationInlineable(Handle<JSFunction> constructor) {
   return constructor->has_initial_map() &&
          !IsDerivedConstructor(constructor->shared()->kind()) &&
+         !constructor->initial_map()->is_dictionary_map() &&
          constructor->initial_map()->instance_type() == JS_OBJECT_TYPE &&
          constructor->initial_map()->instance_size() <
              HAllocate::kMaxInlineSize;
@@ -10018,440 +9872,6 @@ void HOptimizedGraphBuilder::BuildInitializeInobjectProperties(
     }
   }
 }
-
-
-HValue* HGraphBuilder::BuildAllocateEmptyArrayBuffer(HValue* byte_length) {
-  // We HForceRepresentation here to avoid allocations during an *-to-tagged
-  // HChange that could cause GC while the array buffer object is not fully
-  // initialized.
-  HObjectAccess byte_length_access(HObjectAccess::ForJSArrayBufferByteLength());
-  byte_length = AddUncasted<HForceRepresentation>(
-      byte_length, byte_length_access.representation());
-  HAllocate* result =
-      BuildAllocate(Add<HConstant>(JSArrayBuffer::kSizeWithInternalFields),
-                    HType::JSObject(), JS_ARRAY_BUFFER_TYPE, HAllocationMode());
-
-  HValue* native_context = BuildGetNativeContext();
-  Add<HStoreNamedField>(
-      result, HObjectAccess::ForMap(),
-      Add<HLoadNamedField>(
-          native_context, nullptr,
-          HObjectAccess::ForContextSlot(Context::ARRAY_BUFFER_MAP_INDEX)));
-
-  HConstant* empty_fixed_array =
-      Add<HConstant>(isolate()->factory()->empty_fixed_array());
-  Add<HStoreNamedField>(
-      result, HObjectAccess::ForJSArrayOffset(JSArray::kPropertiesOffset),
-      empty_fixed_array);
-  Add<HStoreNamedField>(
-      result, HObjectAccess::ForJSArrayOffset(JSArray::kElementsOffset),
-      empty_fixed_array);
-  Add<HStoreNamedField>(
-      result, HObjectAccess::ForJSArrayBufferBackingStore().WithRepresentation(
-                  Representation::Smi()),
-      graph()->GetConstant0());
-  Add<HStoreNamedField>(result, byte_length_access, byte_length);
-  Add<HStoreNamedField>(result, HObjectAccess::ForJSArrayBufferBitFieldSlot(),
-                        graph()->GetConstant0());
-  Add<HStoreNamedField>(
-      result, HObjectAccess::ForJSArrayBufferBitField(),
-      Add<HConstant>((1 << JSArrayBuffer::IsExternal::kShift) |
-                     (1 << JSArrayBuffer::IsNeuterable::kShift)));
-
-  for (int field = 0; field < v8::ArrayBuffer::kInternalFieldCount; ++field) {
-    Add<HStoreNamedField>(
-        result,
-        HObjectAccess::ForObservableJSObjectOffset(
-            JSArrayBuffer::kSize + field * kPointerSize, Representation::Smi()),
-        graph()->GetConstant0());
-  }
-
-  return result;
-}
-
-
-template <class ViewClass>
-void HGraphBuilder::BuildArrayBufferViewInitialization(
-    HValue* obj,
-    HValue* buffer,
-    HValue* byte_offset,
-    HValue* byte_length) {
-
-  for (int offset = ViewClass::kSize;
-       offset < ViewClass::kSizeWithInternalFields;
-       offset += kPointerSize) {
-    Add<HStoreNamedField>(obj,
-        HObjectAccess::ForObservableJSObjectOffset(offset),
-        graph()->GetConstant0());
-  }
-
-  Add<HStoreNamedField>(
-      obj,
-      HObjectAccess::ForJSArrayBufferViewByteOffset(),
-      byte_offset);
-  Add<HStoreNamedField>(
-      obj,
-      HObjectAccess::ForJSArrayBufferViewByteLength(),
-      byte_length);
-  Add<HStoreNamedField>(obj, HObjectAccess::ForJSArrayBufferViewBuffer(),
-                        buffer);
-}
-
-bool HOptimizedGraphBuilder::TryInlineSIMDBuiltinCall(Call* expr,
-                                                      BuiltinFunctionId id,
-                                                      int argument_count) {
-  switch (id) {
-#define SIMD_NULLARY_OPERATION_CASE_ITEM(p1, p2, name, p4) case k##name:
-    SIMD_NULLARY_OPERATIONS(SIMD_NULLARY_OPERATION_CASE_ITEM)
-#undef SIMD_NULLARY_OPERATION_CASE_ITEM
-    if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 1) {
-      Drop(2);  // Receiver and function.
-      HInstruction* op = NewUncasted<HNullarySIMDOperation>(id);
-      ast_context()->ReturnInstruction(op, expr->id());
-      return true;
-    }
-    break;
-#define SIMD_UNARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5) case k##name:
-    SIMD_UNARY_OPERATIONS(SIMD_UNARY_OPERATION_CASE_ITEM)
-#undef SIMD_UNARY_OPERATION_CASE_ITEM
-    if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 2) {
-      HValue* argument = Pop();
-      Drop(2);  // Receiver and function.
-      HInstruction* op = NewUncasted<HUnarySIMDOperation>(argument, id);
-      ast_context()->ReturnInstruction(op, expr->id());
-      return true;
-    }
-    break;
-#define SIMD_BINARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5, p6) case k##name:
-    SIMD_BINARY_OPERATIONS(SIMD_BINARY_OPERATION_CASE_ITEM)
-#undef SIMD_BINARY_OPERATION_CASE_ITEM
-    if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 3) {
-      HValue* right = Pop();
-      HValue* left = Pop();
-      Drop(2);  // Receiver and function.
-      HInstruction* op = NewUncasted<HBinarySIMDOperation>(left, right, id);
-      ast_context()->ReturnInstruction(op, expr->id());
-      return true;
-    }
-    break;
-#define SIMD_TERNARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5, p6, p7) \
-  case k##name:
-    SIMD_TERNARY_OPERATIONS(SIMD_TERNARY_OPERATION_CASE_ITEM)
-#undef SIMD_TERNARY_OPERATION_CASE_ITEM
-    if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 4) {
-      HValue* right = Pop();
-      HValue* left = Pop();
-      HValue* value = Pop();
-      Drop(2);  // Receiver and function.
-      HInstruction* op =
-          NewUncasted<HTernarySIMDOperation>(value, left, right, id);
-      ast_context()->ReturnInstruction(op, expr->id());
-      return true;
-    }
-    break;
-#define SIMD_QUARTERNARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5, p6, p7, p8) \
-  case k##name:
-    SIMD_QUARTERNARY_OPERATIONS(SIMD_QUARTERNARY_OPERATION_CASE_ITEM)
-#undef SIMD_QUARTERNARY_OPERATION_CASE_ITEM
-    if (CpuFeatures::SupportsSIMD128InCrankshaft() && argument_count == 5) {
-      HValue* w = Pop();
-      HValue* z = Pop();
-      HValue* y = Pop();
-      HValue* x = Pop();
-      Drop(2);  // Receiver and function.
-      HValue* context = environment()->context();
-      HInstruction* op = HQuarternarySIMDOperation::New(
-          isolate(), zone(), context, x, y, z, w, id);
-      ast_context()->ReturnInstruction(op, expr->id());
-      return true;
-    }
-    break;
-#define SIMD_QUINARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5, p6, p7, p8, p9) \
-  case k##name:
-    SIMD_QUINARY_OPERATIONS(SIMD_QUINARY_OPERATION_CASE_ITEM)
-#undef SIMD_QUINARY_OPERATION_CASE_ITEM
-    if (CpuFeatures::SupportsSIMD128InCrankshaft() &&
-        expr->arguments()->length() == 5) {
-      HValue* a4 = Pop();
-      HValue* a3 = Pop();
-      HValue* a2 = Pop();
-      HValue* a1 = Pop();
-      HValue* a0 = Pop();
-      Drop(2);  // Receiver and function.
-      HInstruction* op =
-          NewUncasted<HQuinarySIMDOperation>(a0, a1, a2, a3, a4, id);
-      ast_context()->ReturnInstruction(op, expr->id());
-      return true;
-    }
-    break;
-#define SIMD_SENARY_OPERATION_CASE_ITEM(p1, p2, name, p4, p5, p6, p7, p8, p9, \
-                                        p10)                                  \
-  case k##name:
-    SIMD_SENARY_OPERATIONS(SIMD_SENARY_OPERATION_CASE_ITEM)
-#undef SIMD_SENARY_OPERATION_CASE_ITEM
-    if (CpuFeatures::SupportsSIMD128InCrankshaft() &&
-        expr->arguments()->length() == 6) {
-      HValue* a5 = Pop();
-      HValue* a4 = Pop();
-      HValue* a3 = Pop();
-      HValue* a2 = Pop();
-      HValue* a1 = Pop();
-      HValue* a0 = Pop();
-      Drop(2);  // Receiver and function.
-      HInstruction* op =
-          NewUncasted<HSenarySIMDOperation>(a0, a1, a2, a3, a4, a5, id);
-      ast_context()->ReturnInstruction(op, expr->id());
-      return true;
-    }
-    break;
-    default:
-      break;
-  }
-  return false;
-}
-
-HValue* HOptimizedGraphBuilder::BuildAllocateExternalElements(
-    ExternalArrayType array_type,
-    bool is_zero_byte_offset,
-    HValue* buffer, HValue* byte_offset, HValue* length) {
-  Handle<Map> external_array_map(
-      isolate()->heap()->MapForFixedTypedArray(array_type));
-
-  // The HForceRepresentation is to prevent possible deopt on int-smi
-  // conversion after allocation but before the new object fields are set.
-  length = AddUncasted<HForceRepresentation>(length, Representation::Smi());
-  HValue* elements = Add<HAllocate>(
-      Add<HConstant>(FixedTypedArrayBase::kHeaderSize), HType::HeapObject(),
-      NOT_TENURED, external_array_map->instance_type(),
-      graph()->GetConstant0());
-
-  AddStoreMapConstant(elements, external_array_map);
-  Add<HStoreNamedField>(elements,
-      HObjectAccess::ForFixedArrayLength(), length);
-
-  HValue* backing_store = Add<HLoadNamedField>(
-      buffer, nullptr, HObjectAccess::ForJSArrayBufferBackingStore());
-
-  HValue* typed_array_start;
-  if (is_zero_byte_offset) {
-    typed_array_start = backing_store;
-  } else {
-    HInstruction* external_pointer =
-        AddUncasted<HAdd>(backing_store, byte_offset);
-    // Arguments are checked prior to call to TypedArrayInitialize,
-    // including byte_offset.
-    external_pointer->ClearFlag(HValue::kCanOverflow);
-    typed_array_start = external_pointer;
-  }
-
-  Add<HStoreNamedField>(elements,
-                        HObjectAccess::ForFixedTypedArrayBaseBasePointer(),
-                        graph()->GetConstant0());
-  Add<HStoreNamedField>(elements,
-                        HObjectAccess::ForFixedTypedArrayBaseExternalPointer(),
-                        typed_array_start);
-
-  return elements;
-}
-
-
-HValue* HOptimizedGraphBuilder::BuildAllocateFixedTypedArray(
-    ExternalArrayType array_type, size_t element_size,
-    ElementsKind fixed_elements_kind, HValue* byte_length, HValue* length,
-    bool initialize) {
-  STATIC_ASSERT(
-      (FixedTypedArrayBase::kHeaderSize & kObjectAlignmentMask) == 0);
-  HValue* total_size;
-
-  // if fixed array's elements are not aligned to object's alignment,
-  // we need to align the whole array to object alignment.
-  if (element_size % kObjectAlignment != 0) {
-    total_size = BuildObjectSizeAlignment(
-        byte_length, FixedTypedArrayBase::kHeaderSize);
-  } else {
-    total_size = AddUncasted<HAdd>(byte_length,
-        Add<HConstant>(FixedTypedArrayBase::kHeaderSize));
-    total_size->ClearFlag(HValue::kCanOverflow);
-  }
-
-  // The HForceRepresentation is to prevent possible deopt on int-smi
-  // conversion after allocation but before the new object fields are set.
-  length = AddUncasted<HForceRepresentation>(length, Representation::Smi());
-  Handle<Map> fixed_typed_array_map(
-      isolate()->heap()->MapForFixedTypedArray(array_type));
-  HAllocate* elements = Add<HAllocate>(
-      total_size, HType::HeapObject(), NOT_TENURED,
-      fixed_typed_array_map->instance_type(), graph()->GetConstant0());
-
-#ifndef V8_HOST_ARCH_64_BIT
-  if (array_type == kExternalFloat64Array) {
-    elements->MakeDoubleAligned();
-  }
-#endif
-
-  AddStoreMapConstant(elements, fixed_typed_array_map);
-
-  Add<HStoreNamedField>(elements,
-      HObjectAccess::ForFixedArrayLength(),
-      length);
-  Add<HStoreNamedField>(
-      elements, HObjectAccess::ForFixedTypedArrayBaseBasePointer(), elements);
-
-  Add<HStoreNamedField>(
-      elements, HObjectAccess::ForFixedTypedArrayBaseExternalPointer(),
-      Add<HConstant>(ExternalReference::fixed_typed_array_base_data_offset()));
-
-  HValue* filler = Add<HConstant>(static_cast<int32_t>(0));
-
-  if (initialize) {
-    LoopBuilder builder(this, context(), LoopBuilder::kPostIncrement);
-
-    HValue* backing_store = AddUncasted<HAdd>(
-        Add<HConstant>(ExternalReference::fixed_typed_array_base_data_offset()),
-        elements, AddOfExternalAndTagged);
-
-    HValue* key = builder.BeginBody(
-        Add<HConstant>(static_cast<int32_t>(0)),
-        length, Token::LT);
-    Add<HStoreKeyed>(backing_store, key, filler, elements, fixed_elements_kind);
-
-    builder.EndBody();
-  }
-  return elements;
-}
-
-
-void HOptimizedGraphBuilder::GenerateTypedArrayInitialize(
-    CallRuntime* expr) {
-  ZoneList<Expression*>* arguments = expr->arguments();
-
-  static const int kObjectArg = 0;
-  static const int kArrayIdArg = 1;
-  static const int kBufferArg = 2;
-  static const int kByteOffsetArg = 3;
-  static const int kByteLengthArg = 4;
-  static const int kInitializeArg = 5;
-  static const int kArgsLength = 6;
-  DCHECK(arguments->length() == kArgsLength);
-
-
-  CHECK_ALIVE(VisitForValue(arguments->at(kObjectArg)));
-  HValue* obj = Pop();
-
-  if (!arguments->at(kArrayIdArg)->IsLiteral()) {
-    // This should never happen in real use, but can happen when fuzzing.
-    // Just bail out.
-    Bailout(kNeedSmiLiteral);
-    return;
-  }
-  Handle<Object> value =
-      static_cast<Literal*>(arguments->at(kArrayIdArg))->value();
-  if (!value->IsSmi()) {
-    // This should never happen in real use, but can happen when fuzzing.
-    // Just bail out.
-    Bailout(kNeedSmiLiteral);
-    return;
-  }
-  int array_id = Smi::cast(*value)->value();
-
-  HValue* buffer;
-  if (!arguments->at(kBufferArg)->IsNullLiteral()) {
-    CHECK_ALIVE(VisitForValue(arguments->at(kBufferArg)));
-    buffer = Pop();
-  } else {
-    buffer = NULL;
-  }
-
-  HValue* byte_offset;
-  bool is_zero_byte_offset;
-
-  if (arguments->at(kByteOffsetArg)->IsLiteral() &&
-      Smi::kZero ==
-          *static_cast<Literal*>(arguments->at(kByteOffsetArg))->value()) {
-    byte_offset = Add<HConstant>(static_cast<int32_t>(0));
-    is_zero_byte_offset = true;
-  } else {
-    CHECK_ALIVE(VisitForValue(arguments->at(kByteOffsetArg)));
-    byte_offset = Pop();
-    is_zero_byte_offset = false;
-    DCHECK(buffer != NULL);
-  }
-
-  CHECK_ALIVE(VisitForValue(arguments->at(kByteLengthArg)));
-  HValue* byte_length = Pop();
-
-  CHECK(arguments->at(kInitializeArg)->IsLiteral());
-  bool initialize = static_cast<Literal*>(arguments->at(kInitializeArg))
-                        ->value()
-                        ->BooleanValue();
-
-  NoObservableSideEffectsScope scope(this);
-  IfBuilder byte_offset_smi(this);
-
-  if (!is_zero_byte_offset) {
-    byte_offset_smi.If<HIsSmiAndBranch>(byte_offset);
-    byte_offset_smi.Then();
-  }
-
-  ExternalArrayType array_type =
-      kExternalInt8Array;  // Bogus initialization.
-  size_t element_size = 1;  // Bogus initialization.
-  ElementsKind fixed_elements_kind =  // Bogus initialization.
-      INT8_ELEMENTS;
-  Runtime::ArrayIdToTypeAndSize(array_id,
-      &array_type,
-      &fixed_elements_kind,
-      &element_size);
-
-
-  { //  byte_offset is Smi.
-    HValue* allocated_buffer = buffer;
-    if (buffer == NULL) {
-      allocated_buffer = BuildAllocateEmptyArrayBuffer(byte_length);
-    }
-    BuildArrayBufferViewInitialization<JSTypedArray>(obj, allocated_buffer,
-                                                     byte_offset, byte_length);
-
-
-    HInstruction* length = AddUncasted<HDiv>(byte_length,
-        Add<HConstant>(static_cast<int32_t>(element_size)));
-    // Callers (in typedarray.js) ensure that length <= %_MaxSmi().
-    length = AddUncasted<HForceRepresentation>(length, Representation::Smi());
-
-    Add<HStoreNamedField>(obj,
-        HObjectAccess::ForJSTypedArrayLength(),
-        length);
-
-    HValue* elements;
-    if (buffer != NULL) {
-      elements = BuildAllocateExternalElements(
-          array_type, is_zero_byte_offset, buffer, byte_offset, length);
-    } else {
-      DCHECK(is_zero_byte_offset);
-      elements = BuildAllocateFixedTypedArray(array_type, element_size,
-                                              fixed_elements_kind, byte_length,
-                                              length, initialize);
-    }
-    Add<HStoreNamedField>(
-        obj, HObjectAccess::ForElementsPointer(), elements);
-  }
-
-  if (!is_zero_byte_offset) {
-    byte_offset_smi.Else();
-    { //  byte_offset is not Smi.
-      Push(obj);
-      CHECK_ALIVE(VisitForValue(arguments->at(kArrayIdArg)));
-      Push(buffer);
-      Push(byte_offset);
-      Push(byte_length);
-      CHECK_ALIVE(VisitForValue(arguments->at(kInitializeArg)));
-      PushArgumentsFromEnvironment(kArgsLength);
-      Add<HCallRuntime>(expr->function(), kArgsLength);
-    }
-  }
-  byte_offset_smi.End();
-}
-
 
 void HOptimizedGraphBuilder::GenerateMaxSmi(CallRuntime* expr) {
   DCHECK(expr->arguments()->length() == 0);
@@ -11283,7 +10703,6 @@ HValue* HGraphBuilder::BuildBinaryOperation(
   return instr;
 }
 
-
 // Check for the form (%_ClassOf(foo) === 'BarClass').
 static bool IsClassOfTest(CompareOperation* expr) {
   if (expr->op() != Token::EQ_STRICT) return false;
@@ -11475,9 +10894,10 @@ void HOptimizedGraphBuilder::VisitCompareOperation(CompareOperation* expr) {
   // with the full codegen: We don't push both left and right values onto
   // the expression stack when one side is a special-case literal.
   Expression* sub_expr = NULL;
-  Handle<String> check;
-  if (expr->IsLiteralCompareTypeof(&sub_expr, &check)) {
-    return HandleLiteralCompareTypeof(expr, sub_expr, check);
+  Literal* literal;
+  if (expr->IsLiteralCompareTypeof(&sub_expr, &literal)) {
+    return HandleLiteralCompareTypeof(expr, sub_expr,
+                                      Handle<String>::cast(literal->value()));
   }
   if (expr->IsLiteralCompareUndefined(&sub_expr)) {
     return HandleLiteralCompareNil(expr, sub_expr, kUndefinedValue);
@@ -11821,6 +11241,11 @@ void HOptimizedGraphBuilder::VisitGetIterator(GetIterator* expr) {
   UNREACHABLE();
 }
 
+void HOptimizedGraphBuilder::VisitImportCallExpression(
+    ImportCallExpression* expr) {
+  UNREACHABLE();
+}
+
 HValue* HOptimizedGraphBuilder::AddThisFunction() {
   return AddInstruction(BuildThisFunction());
 }
@@ -11883,6 +11308,14 @@ HInstruction* HOptimizedGraphBuilder::BuildFastLiteral(
   // properties to a safe value.
   BuildInitializeInobjectProperties(object, initial_map);
 
+  // Copy in-object properties.
+  if (initial_map->NumberOfFields() != 0 ||
+      initial_map->unused_property_fields() > 0) {
+    BuildEmitInObjectProperties(boilerplate_object, object, site_context,
+                                pretenure_flag);
+  }
+
+  // Copy elements.
   Handle<FixedArrayBase> elements(boilerplate_object->elements());
   int elements_size = (elements->length() > 0 &&
       elements->map() != isolate()->heap()->fixed_cow_array_map()) ?
@@ -11920,12 +11353,6 @@ HInstruction* HOptimizedGraphBuilder::BuildFastLiteral(
                           object_elements_cow);
   }
 
-  // Copy in-object properties.
-  if (initial_map->NumberOfFields() != 0 ||
-      initial_map->unused_property_fields() > 0) {
-    BuildEmitInObjectProperties(boilerplate_object, object, site_context,
-                                pretenure_flag);
-  }
   return object;
 }
 
@@ -13180,30 +12607,6 @@ void HTracer::TraceLiveRange(LiveRange* range, const char* type,
       if (op->IsDoubleRegister()) {
         trace_.Add(" \"%s\"",
                    GetRegConfig()->GetDoubleRegisterName(assigned_reg));
-      } else if (op->IsFloat32x4Register()) {
-#if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64
-        trace_.Add(" \"%s\"",
-                   RegisterConfiguration::Crankshaft()->GetSimd128RegisterName(
-                       assigned_reg));
-#else
-        trace_.Add(" \"%s\"", "target hasn't no method toString()");
-#endif
-      } else if (op->IsBool32x4Register()) {
-#if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64
-        trace_.Add(" \"%s\"",
-                   RegisterConfiguration::Crankshaft()->GetSimd128RegisterName(
-                       assigned_reg));
-#else
-        trace_.Add(" \"%s\"", "target hasn't no method toString()");
-#endif
-      } else if (op->IsInt32x4Register()) {
-#if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64
-        trace_.Add(" \"%s\"",
-                   RegisterConfiguration::Crankshaft()->GetSimd128RegisterName(
-                       assigned_reg));
-#else
-        trace_.Add(" \"%s\"", "target hasn't no method toString()");
-#endif
       } else {
         DCHECK(op->IsRegister());
         trace_.Add(" \"%s\"",
@@ -13213,12 +12616,6 @@ void HTracer::TraceLiveRange(LiveRange* range, const char* type,
       LOperand* op = range->TopLevel()->GetSpillOperand();
       if (op->IsDoubleStackSlot()) {
         trace_.Add(" \"double_stack:%d\"", op->index());
-      } else if (op->IsFloat32x4StackSlot()) {
-        trace_.Add(" \"float32x4_stack:%d\"", op->index());
-      } else if (op->IsBool32x4StackSlot()) {
-        trace_.Add(" \"bool32x4_stack:%d\"", op->index());
-      } else if (op->IsInt32x4StackSlot()) {
-        trace_.Add(" \"int32x4_stack:%d\"", op->index());
       } else {
         DCHECK(op->IsStackSlot());
         trace_.Add(" \"stack:%d\"", op->index());

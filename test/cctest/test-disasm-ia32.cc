@@ -54,7 +54,6 @@ TEST(DisasmIa320) {
   v8::internal::byte buffer[4096];
   Assembler assm(isolate, buffer, sizeof buffer);
   DummyStaticFunction(NULL);  // just bloody use it (DELETE; debugging)
-
   // Short immediate instructions
   __ adc(eax, 12345678);
   __ add(eax, Immediate(12345678));
@@ -425,6 +424,10 @@ TEST(DisasmIa320) {
     __ mulps(xmm1, Operand(ebx, ecx, times_4, 10000));
     __ divps(xmm1, xmm0);
     __ divps(xmm1, Operand(ebx, ecx, times_4, 10000));
+    __ minps(xmm1, xmm0);
+    __ minps(xmm1, Operand(ebx, ecx, times_4, 10000));
+    __ maxps(xmm1, xmm0);
+    __ maxps(xmm1, Operand(ebx, ecx, times_4, 10000));
 
     __ ucomiss(xmm0, xmm1);
     __ ucomiss(xmm0, Operand(ebx, ecx, times_4, 10000));
@@ -458,93 +461,27 @@ TEST(DisasmIa320) {
     __ cmpltsd(xmm0, xmm1);
 
     __ andpd(xmm0, xmm1);
+
+    __ psllw(xmm0, 17);
+    __ pslld(xmm0, 17);
+    __ psrlw(xmm0, 17);
+    __ psrld(xmm0, 17);
+    __ psraw(xmm0, 17);
+    __ psrad(xmm0, 17);
     __ psllq(xmm0, 17);
     __ psllq(xmm0, xmm1);
     __ psrlq(xmm0, 17);
     __ psrlq(xmm0, xmm1);
-    __ por(xmm0, xmm1);
 
-    __ pcmpeqd(xmm1, xmm0);
+    __ pinsrw(xmm5, edx, 5);
+    __ pinsrw(xmm5, Operand(edx, 4), 5);
 
-    __ punpckldq(xmm1, xmm6);
-    __ punpckhdq(xmm7, xmm5);
-  }
-  {
-    __ cvttss2si(edx, Operand(ebx, ecx, times_4, 10000));
-    __ cvtsi2sd(xmm1, Operand(ebx, ecx, times_4, 10000));
-    __ movsd(xmm1, Operand(ebx, ecx, times_4, 10000));
-    __ movsd(Operand(ebx, ecx, times_4, 10000), xmm1);
-    // 128 bit move instructions.
-    __ movdqa(xmm0, Operand(ebx, ecx, times_4, 10000));
-    __ movdqa(Operand(ebx, ecx, times_4, 10000), xmm0);
-    __ movdqu(xmm0, Operand(ebx, ecx, times_4, 10000));
-    __ movdqu(Operand(ebx, ecx, times_4, 10000), xmm0);
+#define EMIT_SSE2_INSTR(instruction, notUsed1, notUsed2, notUsed3) \
+  __ instruction(xmm5, xmm1);                                      \
+  __ instruction(xmm5, Operand(edx, 4));
 
-    __ addsd(xmm1, xmm0);
-    __ mulsd(xmm1, xmm0);
-    __ subsd(xmm1, xmm0);
-    __ divsd(xmm1, xmm0);
-    __ ucomisd(xmm0, xmm1);
-    __ cmpltsd(xmm0, xmm1);
-
-    __ andpd(xmm0, xmm1);
-    __ psllq(xmm0, 17);
-    __ psllq(xmm0, xmm1);
-    __ psrlq(xmm0, 17);
-    __ psrlq(xmm0, xmm1);
-    __ por(xmm0, xmm1);
-
-    // new instruction introduced by SIMD
-    __ cvtdq2ps(xmm1, Operand(ebx, ecx, times_4, 10000));
-    __ cvtdq2ps(xmm1, xmm0);
-    __ cvtps2dq(xmm1, Operand(ebx, ecx, times_4, 10000));
-    __ cvtps2dq(xmm1, xmm0);
-    __ paddd(xmm1, Operand(ebx, ecx, times_4, 10000));
-    __ paddd(xmm1, xmm0);
-    __ psubd(xmm1, Operand(ebx, ecx, times_4, 10000));
-    __ psubd(xmm1, xmm0);
-    __ pmuludq(xmm1, Operand(ebx, ecx, times_4, 10000));
-    __ pmuludq(xmm1, xmm0);
-    __ punpackldq(xmm1, Operand(ebx, ecx, times_4, 10000));
-    __ punpackldq(xmm1, xmm0);
-    {
-      __ shufps(xmm1, xmm1, 0x0);
-      __ movups(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ movups(Operand(ebx, ecx, times_4, 10000), xmm1);
-
-      __ andps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ andps(xmm1, xmm0);
-      __ xorps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ xorps(xmm1, xmm0);
-      __ orps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ orps(xmm1, xmm0);
-
-      __ addps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ addps(xmm1, xmm0);
-      __ subps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ subps(xmm1, xmm0);
-      __ mulps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ mulps(xmm1, xmm0);
-      __ divps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ divps(xmm1, xmm0);
-      __ minps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ minps(xmm1, xmm0);
-      __ maxps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ maxps(xmm1, xmm0);
-      __ rcpps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ rcpps(xmm1, xmm0);
-      __ rsqrtps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ rsqrtps(xmm1, xmm0);
-      __ sqrtps(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ sqrtps(xmm1, xmm0);
-
-      __ cmpeqps(xmm1, xmm0);
-      __ cmpltps(xmm1, xmm0);
-      __ cmpleps(xmm1, xmm0);
-      __ cmpneqps(xmm1, xmm0);
-      __ cmpnltps(xmm1, xmm0);
-      __ cmpnleps(xmm1, xmm0);
-    }
+    SSE2_INSTRUCTION_LIST(EMIT_SSE2_INSTR)
+#undef EMIT_SSE2_INSTR
   }
 
   // cmov.
@@ -573,9 +510,13 @@ TEST(DisasmIa320) {
       __ pextrd(eax, xmm0, 1);
       __ pinsrd(xmm1, eax, 0);
       __ extractps(eax, xmm1, 0);
-      __ insertps(xmm1, xmm0, 0);
-      __ pmulld(xmm1, Operand(ebx, ecx, times_4, 10000));
-      __ pmulld(xmm1, xmm0);
+
+#define EMIT_SSE4_INSTR(instruction, notUsed1, notUsed2, notUsed3, notUsed4) \
+  __ instruction(xmm5, xmm1);                                                \
+  __ instruction(xmm5, Operand(edx, 4));
+
+      SSE4_INSTRUCTION_LIST(EMIT_SSE4_INSTR)
+#undef EMIT_SSE4_INSTR
     }
   }
 
@@ -613,11 +554,56 @@ TEST(DisasmIa320) {
       __ vandps(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
       __ vxorps(xmm0, xmm1, xmm2);
       __ vxorps(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vaddps(xmm0, xmm1, xmm2);
+      __ vaddps(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vmulps(xmm0, xmm1, xmm2);
+      __ vmulps(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vsubps(xmm0, xmm1, xmm2);
+      __ vsubps(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vminps(xmm0, xmm1, xmm2);
+      __ vminps(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vdivps(xmm0, xmm1, xmm2);
+      __ vdivps(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vmaxps(xmm0, xmm1, xmm2);
+      __ vmaxps(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
 
       __ vandpd(xmm0, xmm1, xmm2);
       __ vandpd(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
       __ vxorpd(xmm0, xmm1, xmm2);
       __ vxorpd(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vaddpd(xmm0, xmm1, xmm2);
+      __ vaddpd(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vmulpd(xmm0, xmm1, xmm2);
+      __ vmulpd(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vsubpd(xmm0, xmm1, xmm2);
+      __ vsubpd(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vminpd(xmm0, xmm1, xmm2);
+      __ vminpd(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vdivpd(xmm0, xmm1, xmm2);
+      __ vdivpd(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ vmaxpd(xmm0, xmm1, xmm2);
+      __ vmaxpd(xmm0, xmm1, Operand(ebx, ecx, times_4, 10000));
+
+      __ vpsllw(xmm0, xmm7, 21);
+      __ vpslld(xmm0, xmm7, 21);
+      __ vpsrlw(xmm0, xmm7, 21);
+      __ vpsrld(xmm0, xmm7, 21);
+      __ vpsraw(xmm0, xmm7, 21);
+      __ vpsrad(xmm0, xmm7, 21);
+#define EMIT_SSE2_AVXINSTR(instruction, notUsed1, notUsed2, notUsed3) \
+  __ v##instruction(xmm7, xmm5, xmm1);                                \
+  __ v##instruction(xmm7, xmm5, Operand(edx, 4));
+
+      SSE2_INSTRUCTION_LIST(EMIT_SSE2_AVXINSTR)
+#undef EMIT_SSE2_AVXINSTR
+
+#define EMIT_SSE4_AVXINSTR(instruction, notUsed1, notUsed2, notUsed3, \
+                           notUsed4)                                  \
+  __ v##instruction(xmm7, xmm5, xmm1);                                \
+  __ v##instruction(xmm7, xmm5, Operand(edx, 4));
+
+      SSE4_INSTRUCTION_LIST(EMIT_SSE4_AVXINSTR)
+#undef EMIT_SSE4_AVXINSTR
     }
   }
 
